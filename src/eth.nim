@@ -35,9 +35,9 @@ proc `$`(x:Object):string=
 proc newInt(i: SomeInteger): Object =
   new result
   result = Object(kind: okInt, ival: cast[uint64](i))
-proc newIdn():Object=
+proc newIdn(s:string):Object=
   new result
-  result = Object(kind:okIdn)
+  result = Object(kind:okIdn,name:s)
 var
   defines: HashSet[string]
   options: HashSet[string]
@@ -99,9 +99,6 @@ when isMainModule:
       cpEnv.outStk.pop()
     proc pops(): State {.inline, discardable.} =
       cpEnv.stk.pop()
-    template invalidChar =
-      error "Unexpected char '", $c, "'; exiting."
-      quit(QuitFailure)
     template d2i(a: char): uint64 =
       uint64(a.int8-'0'.int8)
     template h2i(a: char): uint64 =
@@ -114,10 +111,13 @@ when isMainModule:
       else:
         -1'i8)
     proc process(c: char) =
+      proc invalidChar() =
+        error "Unexpected char '" & ($c.int8) & "'; exiting."
+        quit(QuitFailure)
       case tops
       of stTop:
         case c
-        of ' ', '\n', '\t':
+        of ' ', '\n', '\r', '\t':
           return
         of '0':
           pushs stIPref0
@@ -126,7 +126,7 @@ when isMainModule:
           push newInt(c.d2i)
         of 'A'..'Z', 'a'..'z':
           pushs stIdn
-          push newIdn()
+          push newIdn($c)
         else:
           invalidChar()
       of stIPref0:
@@ -242,6 +242,7 @@ when isMainModule:
       if f.endOfFile:
         break
       var c = f.readChar()
+      stdout.write c
       process c
       echo cpEnv.outStk
 
