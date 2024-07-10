@@ -1,23 +1,24 @@
 # The whole compiler
+import myColoredLogger
 import std/[logging, os, parseopt, sets, tables]
 {.push used.}
 type
   UId = uint64
   ObjectKind = enum
-    okI8, okI16, okI32, okI64, okU8, okU16, okU32, okU64, okInt, okUInt,
-      okFloat, okF32, okF64, okIdn
+    okI1, okI2, okI4, okI8, okU1, okU2, okU4, okU8, okInt, okUInt,
+      okFloat, okF4, okF8, okIdn
   Object = ref object
     case kind: ObjectKind
-    of okI8, okI16, okI32, okI64, okU8, okU16, okU32, okU64, okInt, okUInt:
+    of okI1, okI2, okI4, okI8, okU1, okU2, okU4, okU8, okInt, okUInt:
       ival: uint64
-    of okFloat, okF32, okF64:
+    of okFloat, okF4, okF8:
       fval: float64
+      lastE: float=10.0
     of okIdn:
       name: string
       uid: UId
   State = enum
-    stTop, stIPref0, stIPrefK, stI, stIBin, stIOct, stIHex, stIPsfK, stIPsfS1,
-      stIPsfS2, stIdn
+    stTop, stIPref0, stIPrefK, stI, stIBin, stIOct, stIHex, stIPsf, stIdn, stF, stFPsf
   CpEnv = ref object
     stk: seq[State]
     outStk: seq[Object]
@@ -26,15 +27,18 @@ type
     count:int
 proc `$`(x:Object):string=
   case x.kind
-  of okI8, okI16, okI32, okI64, okU8, okU16, okU32, okU64, okInt, okUInt:
+  of okI1, okI2, okI4, okI8, okU1, okU2, okU4, okU8, okInt, okUInt:
     ($x.ival)&($x.kind)[2..^1]
-  of okF32,okF64,okFloat:
+  of okF4,okF8,okFloat:
     ($x.fval)&($x.kind)[2..^1]
   of okIdn:
     x.name&"@"&($x.uid)
 proc newInt(i: SomeInteger): Object =
   new result
   result = Object(kind: okInt, ival: cast[uint64](i))
+proc newFloat(i: SomeFloat): Object =
+  new result
+  result = Object(kind: okFloat, fval: float64(i))
 proc newIdn(s:string):Object=
   new result
   result = Object(kind:okIdn,name:s)
@@ -46,7 +50,7 @@ var
   consoleLogger: ConsoleLogger
   fileLogger: FileLogger
 when isMainModule:
-  consoleLogger = newConsoleLogger(fmtStr = "$levelname: ")
+  consoleLogger = newColoredLogger(fmtStr = "$levelid: ",useStdErr=true)
   fileLogger = newFileLogger("log.log", fmAppend,
       fmtStr = "[$datetime] $levelid: ")
   addHandler(consoleLogger)
@@ -65,24 +69,30 @@ when isMainModule:
         of "l": cmdParser.key = "log"
       if cmdParser.val == "":
         if options.containsOrIncl cmdParser.key:
-          warn "Option already exists; ignoring."
+          notice "Option already exists; ignoring."
       elif cmdParser.key == "define":
         if defines.containsOrIncl cmdParser.val:
-          warn "Define already exists; ignoring."
+          notice "Define already exists; ignoring."
       elif cmdParser.key == "log":
         fileLogger.file.close()
         fileLogger.file = open(cmdParser.val, fmAppend)
       else:
         if cmdParser.key in keyOptions:
-          warn "Option already exists; covering."
+          notice "Option already exists; covering."
         keyOptions[cmdParser.key] = cmdParser.val
     of cmdArgument:
       if files.len > 0:
-        info "More than one input; combining in order."
+        notice "More than one input; combining in order."
       files.add cmdParser.key
   var output{.used.} = ""
   for file in files:
-    var f = open(file, fmRead)
+    var f:File
+    info "Trying to open file "&file
+    try:
+      f = open(file, fmRead)
+    except IOError:
+      error "Could not open file "&file&"; exiting"
+      quit(QuitFailure)
     var cpEnv: CpEnv
     new cpEnv
     cpEnv.stk = newSeqOfCap[State](32)
@@ -144,6 +154,12 @@ when isMainModule:
             fatal "Impossible case; exiting"
             quit(QuitFailure)
           push newInt(0)
+        of '.':
+          pushs stF
+          push newFloat(0.0)
+        of 'f', 'F':
+          pushs stFPsf
+          push newFloat(0.0)
         else:
           push newInt(0)
           process c
@@ -151,70 +167,106 @@ when isMainModule:
         case c
         of '0'..'9':
           top.ival = top.ival*10+c.d2i
+        of 'i', 'I':
+          pops()
+          pushs stIPsf
+        of 'u', 'U':
+          pops()
+          top = Object(kind: okUInt, ival: top.ival)
+          pushs stIPsf
+        of '.':
+          pops()
+          pushs stF
+          push newFloat(float64(pop().ival))
+        of 'f', 'F':
+          pops()
+          pushs stFPsf
+          push newFloat(float64(pop().ival))
         else:
           pops()
-          pushs stIPsfK
+          process c
       of stIHex:
         case c
         of '0'..'9', 'a'..'f', 'A'..'F':
           top.ival = (top.ival shl 4)+c.h2i
-        else:
+        of 'i', 'I':
           pops()
-          pushs stIPsfK
+          pushs stIPsf
+        of 'u', 'U':
+          pops()
+          top = Object(kind: okUInt, ival: top.ival)
+          pushs stIPsf
+        else:
+          process c
       of stIOct:
         case c
         of '0'..'7':
           top.ival = (top.ival shl 3)+c.d2i
-        else:
+        of 'i', 'I':
           pops()
-          pushs stIPsfK
+          pushs stIPsf
+        of 'u', 'U':
+          pops()
+          top = Object(kind: okUInt, ival: top.ival)
+          pushs stIPsf
+        else:
+          process c
       of stIBin:
         case c
         of '0'..'1':
           top.ival = (top.ival shl 1)+c.d2i
-        else:
-          pops()
-          pushs stIPsfK
-      of stIPsfK:
-        pops()
-        case c
         of 'i', 'I':
-          pushs stIPsfS1
+          pops()
+          pushs stIPsf
         of 'u', 'U':
+          pops()
           top = Object(kind: okUInt, ival: top.ival)
-          pushs stIPsfS1
+          pushs stIPsf
         else:
           process c
-      of stIPsfS1:
+      of stIPsf:
         pops()
         case c
+        of '1':
+          if top.kind == okUInt:
+            top = Object(kind: okU1, ival: top.ival)
+          else:
+            top = Object(kind: okI1, ival: top.ival)
+        of '2':
+          if top.kind == okUInt:
+            top = Object(kind: okU2, ival: top.ival)
+          else:
+            top = Object(kind: okI2, ival: top.ival)
+        of '4':
+          if top.kind == okUInt:
+            top = Object(kind: okU4, ival: top.ival)
+          else:
+            top = Object(kind: okI4, ival: top.ival)
         of '8':
           if top.kind == okUInt:
             top = Object(kind: okU8, ival: top.ival)
           else:
             top = Object(kind: okI8, ival: top.ival)
-        of '1', '3', '6':
-          pushs stIPsfS2
         else:
           process c
-      of stIPsfS2:
+      of stF:
+        case c
+        of '0'..'9':
+          top.fval = top.fval+c.d2i.float64/top.lastE
+          top.lastE*=10.0
+        of 'f', 'F':
+          pops()
+          pushs stFPsf
+        else:
+          pops()
+          process c
+      of stFPsf:
         pops()
         case c
-        of '6':
-          if top.kind == okUInt:
-            top = Object(kind: okU16, ival: top.ival)
-          else:
-            top = Object(kind: okI16, ival: top.ival)
-        of '2':
-          if top.kind == okUInt:
-            top = Object(kind: okU32, ival: top.ival)
-          else:
-            top = Object(kind: okI32, ival: top.ival)
         of '4':
-          if top.kind == okUInt:
-            top = Object(kind: okU64, ival: top.ival)
-          else:
-            top = Object(kind: okI64, ival: top.ival)
+          top = Object(kind: okF4, fval: top.fval)
+        of '8':
+          top = Object(kind: okF8, fval: top.fval)
         else:
           process c
       of stIdn:
@@ -242,8 +294,7 @@ when isMainModule:
       if f.endOfFile:
         break
       var c = f.readChar()
-      stdout.write c
       process c
-      echo cpEnv.outStk
+    echo cpEnv.outStk
 
 

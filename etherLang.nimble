@@ -11,3 +11,9 @@ binDir        = "bin"
 # Dependencies
 
 requires "nim >= 2.0.0"
+
+# Tasks
+
+task sample,"running samples":
+  exec "nimble build"
+  exec "bin/eth sample/tokens.eth"
